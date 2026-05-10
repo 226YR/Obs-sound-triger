@@ -2,16 +2,16 @@ import threading
 import time
 from collections import deque
 
-import librosa
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
+from python_speech_features import mfcc as psf_mfcc
+from scipy.signal import resample
 
 
 class SoundDetector:
-    SAMPLE_RATE = 22050
+    SAMPLE_RATE = 16000
     N_MFCC = 20
-    HOP_LENGTH = 256
 
     def __init__(self):
         self.templates: dict = {}
@@ -24,22 +24,23 @@ class SoundDetector:
         self._queue: deque = deque(maxlen=2000)
         self._queue_lock = threading.Lock()
         self._monitor_thread = None
-        self.on_similarity_update = None  # callback(trigger_type, score)
+        self.on_similarity_update = None
 
     # ------------------------------------------------------------------ #
     # Template loading                                                      #
     # ------------------------------------------------------------------ #
 
     def load_template(self, trigger_type: str, filepath: str):
-        y, _ = librosa.load(filepath, sr=self.SAMPLE_RATE, mono=True)
+        y, sr = sf.read(filepath, dtype="float32")
+        if y.ndim > 1:
+            y = y.mean(axis=1)
+        if sr != self.SAMPLE_RATE:
+            y = resample(y, int(len(y) * self.SAMPLE_RATE / sr))
         y = self._normalize(y)
-        mfcc = librosa.feature.mfcc(
-            y=y, sr=self.SAMPLE_RATE, n_mfcc=self.N_MFCC, hop_length=self.HOP_LENGTH
-        )
         self.templates[trigger_type] = {
-            "feature": self._feature_vec(mfcc),
+            "feature": self._feature_vec(y),
             "duration": len(y) / self.SAMPLE_RATE,
-            "rms": float(np.sqrt(np.mean(y**2))),
+            "rms": float(np.sqrt(np.mean(y ** 2))),
         }
         self._last_trigger[trigger_type] = 0.0
 
@@ -74,8 +75,10 @@ class SoundDetector:
         peak = np.max(np.abs(y))
         return y / peak if peak > 1e-6 else y
 
-    def _feature_vec(self, mfcc: np.ndarray) -> np.ndarray:
-        return np.concatenate([np.mean(mfcc, axis=1), np.std(mfcc, axis=1)])
+    def _feature_vec(self, y: np.ndarray) -> np.ndarray:
+        mfcc = psf_mfcc(y, self.SAMPLE_RATE, numcep=self.N_MFCC,
+                         nfilt=40, nfft=512, winlen=0.025, winstep=0.01)
+        return np.concatenate([np.mean(mfcc, axis=0), np.std(mfcc, axis=0)])
 
     def _cosine(self, a: np.ndarray, b: np.ndarray) -> float:
         na, nb = np.linalg.norm(a), np.linalg.norm(b)
@@ -85,22 +88,17 @@ class SoundDetector:
 
     def _similarity(self, trigger_type: str, segment: np.ndarray) -> float:
         tmpl = self.templates[trigger_type]
-        # Energy gate: skip if segment is much quieter than template
-        seg_rms = float(np.sqrt(np.mean(segment**2)))
-        if seg_rms < tmpl["rms"] * 0.05:
+        if float(np.sqrt(np.mean(segment ** 2))) < tmpl["rms"] * 0.05:
             return 0.0
         seg = self._normalize(segment)
-        mfcc = librosa.feature.mfcc(
-            y=seg, sr=self.SAMPLE_RATE, n_mfcc=self.N_MFCC, hop_length=self.HOP_LENGTH
-        )
-        return self._cosine(tmpl["feature"], self._feature_vec(mfcc))
+        return self._cosine(tmpl["feature"], self._feature_vec(seg))
 
     def _loop(self):
         if not self.templates:
             return
 
         max_dur = max(t["duration"] for t in self.templates.values())
-        chunk_size = int(0.05 * self.SAMPLE_RATE)  # 50ms chunks
+        chunk_size = int(0.05 * self.SAMPLE_RATE)
         buf_size = int((max_dur + 1.5) * self.SAMPLE_RATE)
         accumulated = np.zeros(0, dtype=np.float32)
 
@@ -108,13 +106,8 @@ class SoundDetector:
             with self._queue_lock:
                 self._queue.append(indata[:, 0].copy())
 
-        with sd.InputStream(
-            samplerate=self.SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-            blocksize=chunk_size,
-            callback=_cb,
-        ):
+        with sd.InputStream(samplerate=self.SAMPLE_RATE, channels=1,
+                            dtype="float32", blocksize=chunk_size, callback=_cb):
             while self.monitoring:
                 chunks = []
                 with self._queue_lock:
@@ -141,13 +134,9 @@ class SoundDetector:
 
                         if score >= self.sensitivity:
                             self._last_trigger[ttype] = now
-                            # Clear buffer to avoid immediate re-trigger
                             accumulated = np.zeros(0, dtype=np.float32)
-                            cb = (
-                                self.on_start_triggered
-                                if ttype == "start"
-                                else self.on_stop_triggered
-                            )
+                            cb = (self.on_start_triggered if ttype == "start"
+                                  else self.on_stop_triggered)
                             if cb:
                                 threading.Thread(target=cb, daemon=True).start()
                             break

@@ -43,14 +43,11 @@ class App:
 
         self.start_path = tk.StringVar(value="未設定")
         self.stop_path  = tk.StringVar(value="未設定")
-        self._is_sampling  = False
         self._is_monitoring = False
 
-        self._sim_bars:  dict[str, ctk.CTkProgressBar] = {}
-        self._rec_duration: dict[str, tk.StringVar] = {
-            "start": tk.StringVar(value="3"),
-            "stop":  tk.StringVar(value="3"),
-        }
+        self._sim_bars: dict[str, ctk.CTkProgressBar] = {}
+        self._rec_streams: dict[str, object] = {}
+        self._rec_buffers: dict[str, list]   = {}
 
         self._build_ui()
         self._load_config()
@@ -148,13 +145,17 @@ class App:
         btn_row = ctk.CTkFrame(pf, fg_color="transparent")
         btn_row.pack(fill="x")
 
-        rec_btn = ctk.CTkButton(btn_row, text="録音", width=70,
-                                 command=lambda: self._record_sample(key))
-        rec_btn.pack(side="left", padx=(0, 4))
-        setattr(self, f"_rec_{key}_btn", rec_btn)
+        start_btn = ctk.CTkButton(btn_row, text="録音開始", width=80,
+                                   fg_color="#2e7d32", hover_color="#388e3c",
+                                   command=lambda: self._start_rec(key))
+        start_btn.pack(side="left", padx=(0, 4))
+        setattr(self, f"_rec_start_{key}_btn", start_btn)
 
-        ctk.CTkEntry(btn_row, textvariable=self._rec_duration[key], width=45).pack(side="left")
-        ctk.CTkLabel(btn_row, text="秒").pack(side="left", padx=(2, 12))
+        stop_btn = ctk.CTkButton(btn_row, text="録音停止", width=80,
+                                  fg_color="gray40", hover_color="gray50", state="disabled",
+                                  command=lambda: self._stop_rec(key))
+        stop_btn.pack(side="left", padx=(0, 12))
+        setattr(self, f"_rec_stop_{key}_btn", stop_btn)
 
         ctk.CTkButton(btn_row, text="ファイル選択", width=100,
                        command=lambda: self._pick_file(key)).pack(side="left", padx=(0, 6))
@@ -204,37 +205,44 @@ class App:
     # Recording sample                                                      #
     # ------------------------------------------------------------------ #
 
-    def _record_sample(self, key: str):
-        if self._is_sampling:
+    def _start_rec(self, key: str):
+        if key in self._rec_streams:
             return
-        try:
-            duration = float(self._rec_duration[key].get())
-            if duration <= 0:
-                raise ValueError
-        except ValueError:
-            messagebox.showerror("エラー", "録音秒数に正の数を入力してください")
+        self._rec_buffers[key] = []
+
+        def _cb(indata, frames, time_info, status):
+            self._rec_buffers[key].append(indata[:, 0].copy())
+
+        stream = sd.InputStream(samplerate=44100, channels=1, dtype="float32", callback=_cb)
+        stream.start()
+        self._rec_streams[key] = stream
+
+        getattr(self, f"_rec_start_{key}_btn").configure(state="disabled")
+        getattr(self, f"_rec_stop_{key}_btn").configure(
+            state="normal", fg_color="#c0392b", hover_color="#e74c3c")
+        self._log_msg(f"[{key}] 録音中...")
+
+    def _stop_rec(self, key: str):
+        stream = self._rec_streams.pop(key, None)
+        if stream is None:
             return
+        stream.stop()
+        stream.close()
 
-        self._is_sampling = True
-        btn = getattr(self, f"_rec_{key}_btn")
-        btn.configure(state="disabled", text="録音中...")
-        self._log_msg(f"[{key}] {duration:.1f}秒間録音します...")
-
-        def _do():
-            sr = 44100
-            audio = sd.rec(int(duration * sr), samplerate=sr, channels=1, dtype="float32")
-            sd.wait()
+        buf = self._rec_buffers.pop(key, [])
+        if not buf:
+            self._log_msg(f"[{key}] 録音データなし")
+        else:
+            import numpy as np
+            audio = np.concatenate(buf)
             path = os.path.join(SOUND_DIR, f"{key}_trigger.wav")
-            sf.write(path, audio, sr)
-            self.root.after(0, lambda: self._on_sample_done(key, path, btn))
+            sf.write(path, audio, 44100)
+            self._set_template(key, path)
+            self._log_msg(f"[{key}] 録音完了: {os.path.basename(path)}")
 
-        threading.Thread(target=_do, daemon=True).start()
-
-    def _on_sample_done(self, key: str, path: str, btn):
-        self._is_sampling = False
-        btn.configure(state="normal", text="録音")
-        self._set_template(key, path)
-        self._log_msg(f"[{key}] 録音完了: {os.path.basename(path)}")
+        getattr(self, f"_rec_start_{key}_btn").configure(state="normal")
+        getattr(self, f"_rec_stop_{key}_btn").configure(
+            state="disabled", fg_color="gray40", hover_color="gray50")
 
     # ------------------------------------------------------------------ #
     # File / preview                                                        #
