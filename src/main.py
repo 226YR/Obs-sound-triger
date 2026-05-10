@@ -10,8 +10,11 @@ import customtkinter as ctk
 import sounddevice as sd
 import soundfile as sf
 
+import numpy as np
+
 from obs_client import OBSClient
 from sound_detector import SoundDetector
+from waveform_editor import WaveformEditor
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -159,6 +162,9 @@ class App:
 
         ctk.CTkButton(btn_row, text="ファイル選択", width=100,
                        command=lambda: self._pick_file(key)).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btn_row, text="波形編集", width=80,
+                       fg_color="#5b4fcf", hover_color="#7c3aed",
+                       command=lambda: self._open_editor(key)).pack(side="left", padx=(0, 6))
         ctk.CTkButton(btn_row, text="試聴", width=60, fg_color="gray40", hover_color="gray50",
                        command=lambda: self._preview(key)).pack(side="left")
 
@@ -233,9 +239,9 @@ class App:
         if not buf:
             self._log_msg(f"[{key}] 録音データなし")
         else:
-            import numpy as np
             audio = np.concatenate(buf)
-            path = os.path.join(SOUND_DIR, f"{key}_trigger.wav")
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(SOUND_DIR, f"{key}_trigger_{ts}.wav")
             sf.write(path, audio, 44100)
             self._set_template(key, path)
             self._log_msg(f"[{key}] 録音完了: {os.path.basename(path)}")
@@ -243,6 +249,25 @@ class App:
         getattr(self, f"_rec_start_{key}_btn").configure(state="normal")
         getattr(self, f"_rec_stop_{key}_btn").configure(
             state="disabled", fg_color="gray40", hover_color="gray50")
+
+    # ------------------------------------------------------------------ #
+    # Waveform editor                                                       #
+    # ------------------------------------------------------------------ #
+
+    def _open_editor(self, key: str):
+        path = self.start_path.get() if key == "start" else self.stop_path.get()
+        if path in ("未設定", "") or not os.path.exists(path):
+            messagebox.showinfo("情報", "先に音声を録音またはファイルを選択してください")
+            return
+
+        def on_confirm(segment: np.ndarray, sr: int):
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            out_path = os.path.join(SOUND_DIR, f"{key}_trigger_{ts}.wav")
+            sf.write(out_path, segment, sr)
+            self._set_template(key, out_path)
+            self._log_msg(f"[{key}] 波形編集完了: {os.path.basename(out_path)}")
+
+        WaveformEditor(self.root, path, on_confirm)
 
     # ------------------------------------------------------------------ #
     # File / preview                                                        #
