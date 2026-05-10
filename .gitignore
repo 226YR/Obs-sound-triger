@@ -1,0 +1,18 @@
+# Claude Code
+.claude/
+
+# PyInstaller
+dist/
+build/
+*.spec
+
+# 録音・設定ファイル（ユーザーごとに異なるもの）
+sound/
+config.json
+*.wav
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
