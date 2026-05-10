@@ -51,10 +51,12 @@ class SoundDetector:
     # Monitoring                                                            #
     # ------------------------------------------------------------------ #
 
-    def start_monitoring(self, sensitivity=0.70, on_start_triggered=None, on_stop_triggered=None):
+    def start_monitoring(self, sensitivity=0.70, on_start_triggered=None,
+                         on_stop_triggered=None, device=None):
         self.sensitivity = sensitivity
         self.on_start_triggered = on_start_triggered
         self.on_stop_triggered = on_stop_triggered
+        self.device = device
         self.monitoring = True
         with self._queue_lock:
             self._queue.clear()
@@ -107,7 +109,8 @@ class SoundDetector:
                 self._queue.append(indata[:, 0].copy())
 
         with sd.InputStream(samplerate=self.SAMPLE_RATE, channels=1,
-                            dtype="float32", blocksize=chunk_size, callback=_cb):
+                            dtype="float32", blocksize=chunk_size, callback=_cb,
+                            device=getattr(self, "device", None)):
             while self.monitoring:
                 chunks = []
                 with self._queue_lock:

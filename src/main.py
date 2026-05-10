@@ -51,6 +51,8 @@ class App:
         self._sim_bars: dict[str, ctk.CTkProgressBar] = {}
         self._rec_streams: dict[str, object] = {}
         self._rec_buffers: dict[str, list]   = {}
+        self._input_devices: list[dict] = []   # {"index": int, "name": str}
+        self._device_var = tk.StringVar(value="デフォルト")
 
         self._build_ui()
         self._load_config()
@@ -97,6 +99,18 @@ class App:
         self._conn_lbl = ctk.CTkLabel(cf, text="● 未接続", text_color="#e05050",
                                        font=ctk.CTkFont(size=12))
         self._conn_lbl.pack(pady=(4, 0))
+
+        # ── 録音デバイス ──────────────────────────────────────────────── #
+        df = self._section(self.root, "  録音デバイス")
+        dev_row = ctk.CTkFrame(df, fg_color="transparent")
+        dev_row.pack(fill="x")
+        self._device_menu = ctk.CTkOptionMenu(dev_row, variable=self._device_var,
+                                               values=["デフォルト"], width=310)
+        self._device_menu.pack(side="left", padx=(0, 8))
+        ctk.CTkButton(dev_row, text="更新", width=60,
+                       fg_color="gray40", hover_color="gray50",
+                       command=self._refresh_devices).pack(side="left")
+        self._refresh_devices()
 
         # ── トリガーパネル ────────────────────────────────────────────── #
         self._build_trigger_panel("  録画開始トリガー音", "start", self.start_path)
@@ -177,6 +191,33 @@ class App:
         self._sim_bars[key] = bar
 
     # ------------------------------------------------------------------ #
+    # Device                                                                #
+    # ------------------------------------------------------------------ #
+
+    def _refresh_devices(self):
+        import sounddevice as sd2
+        devices = sd2.query_devices()
+        self._input_devices = [
+            {"index": i, "name": d["name"]}
+            for i, d in enumerate(devices)
+            if d["max_input_channels"] > 0
+        ]
+        labels = ["デフォルト"] + [f"[{d['index']}] {d['name']}" for d in self._input_devices]
+        self._device_menu.configure(values=labels)
+        current = self._device_var.get()
+        if current not in labels:
+            self._device_var.set("デフォルト")
+
+    def _selected_device_index(self):
+        val = self._device_var.get()
+        if val == "デフォルト":
+            return None
+        for d in self._input_devices:
+            if f"[{d['index']}] {d['name']}" == val:
+                return d["index"]
+        return None
+
+    # ------------------------------------------------------------------ #
     # OBS                                                                   #
     # ------------------------------------------------------------------ #
 
@@ -219,14 +260,17 @@ class App:
         def _cb(indata, frames, time_info, status):
             self._rec_buffers[key].append(indata[:, 0].copy())
 
-        stream = sd.InputStream(samplerate=44100, channels=1, dtype="float32", callback=_cb)
+        dev = self._selected_device_index()
+        stream = sd.InputStream(samplerate=44100, channels=1, dtype="float32",
+                                 callback=_cb, device=dev)
         stream.start()
         self._rec_streams[key] = stream
 
+        dev_label = self._device_var.get()
         getattr(self, f"_rec_start_{key}_btn").configure(state="disabled")
         getattr(self, f"_rec_stop_{key}_btn").configure(
             state="normal", fg_color="#c0392b", hover_color="#e74c3c")
-        self._log_msg(f"[{key}] 録音中...")
+        self._log_msg(f"[{key}] 録音中... (デバイス: {dev_label})")
 
     def _stop_rec(self, key: str):
         stream = self._rec_streams.pop(key, None)
@@ -329,12 +373,15 @@ class App:
             self._is_monitoring = True
             self._mon_btn.configure(text="モニタリング停止", fg_color="#c0392b", hover_color="#e74c3c")
             self._status_lbl.configure(text="モニタリング中...", text_color="#5dade2")
+            dev = self._selected_device_index()
             self.detector.start_monitoring(
                 sensitivity=self._sens.get(),
                 on_start_triggered=self._on_start,
                 on_stop_triggered=self._on_stop,
+                device=dev,
             )
-            self._log_msg("モニタリング開始")
+            dev_label = self._device_var.get()
+            self._log_msg(f"モニタリング開始 (デバイス: {dev_label})")
         else:
             self._is_monitoring = False
             self._mon_btn.configure(text="モニタリング開始", fg_color=("#3b8ed0", "#1f6aa5"),
@@ -379,6 +426,7 @@ class App:
             "cooldown":    self._cd.get(),
             "start_sound": self.start_path.get(),
             "stop_sound":  self.stop_path.get(),
+            "device":      self._device_var.get(),
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -394,6 +442,11 @@ class App:
             self._pw.set(cfg.get("password", ""))
             self._sens.set(cfg.get("sensitivity", 0.70))
             self._cd.set(cfg.get("cooldown", "2.0"))
+            saved_device = cfg.get("device", "デフォルト")
+            current_labels = ["デフォルト"] + [
+                f"[{d['index']}] {d['name']}" for d in self._input_devices]
+            if saved_device in current_labels:
+                self._device_var.set(saved_device)
             for key in ("start", "stop"):
                 path = cfg.get(f"{key}_sound", "")
                 if path and path != "未設定" and os.path.exists(path):
